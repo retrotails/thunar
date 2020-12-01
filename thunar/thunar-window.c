@@ -1968,11 +1968,12 @@ thunar_window_notebook_insert (ThunarWindow  *window,
   gtk_widget_set_margin_end (GTK_WIDGET(label), 3);
   gtk_widget_set_margin_top (GTK_WIDGET(label), 3);
   gtk_widget_set_margin_bottom (GTK_WIDGET(label), 3);
-  gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
+  //gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
   gtk_label_set_single_line_mode (GTK_LABEL (label), TRUE);
   gtk_box_pack_start (GTK_BOX (label_box), label, TRUE, TRUE, 0);
   gtk_widget_show (label);
 
+  /*
   button = gtk_button_new ();
   gtk_box_pack_start (GTK_BOX (label_box), button, FALSE, FALSE, 0);
   gtk_widget_set_can_default (button, FALSE);
@@ -1981,6 +1982,7 @@ thunar_window_notebook_insert (ThunarWindow  *window,
   gtk_widget_set_tooltip_text (button, _("Close tab"));
   g_signal_connect_swapped (G_OBJECT (button), "clicked", G_CALLBACK (gtk_widget_destroy), view);
   gtk_widget_show (button);
+  */
 
   icon = gtk_image_new_from_icon_name ("window-close", GTK_ICON_SIZE_MENU);
   gtk_container_add (GTK_CONTAINER (button), icon);
@@ -1990,7 +1992,7 @@ thunar_window_notebook_insert (ThunarWindow  *window,
   gtk_notebook_insert_page (GTK_NOTEBOOK (window->notebook), view, label_box, position);
 
   /* set tab child properties */
-  gtk_container_child_set (GTK_CONTAINER (window->notebook), view, "tab-expand", TRUE, NULL);
+  gtk_container_child_set (GTK_CONTAINER (window->notebook), view, "tab-expand", FALSE, NULL);
   gtk_notebook_set_tab_reorderable (GTK_NOTEBOOK (window->notebook), view, TRUE);
   gtk_notebook_set_tab_detachable (GTK_NOTEBOOK (window->notebook), view, TRUE);
 
