@@ -392,9 +392,10 @@ thunar_chooser_dialog_response (GtkDialog *widget,
   GAppInfo            *app_info = NULL;
   gboolean             succeed = TRUE;
   GError              *error = NULL;
-  gchar               *path;
+  const gchar         *custom_command;
   gchar               *name;
   GList                list;
+  GList               *all_apps, *lp;
   GdkScreen           *screen;
 
   /* no special processing for non-accept responses */
@@ -413,28 +414,42 @@ thunar_chooser_dialog_response (GtkDialog *widget,
     }
   else
     {
-      /* Wrap the path into double quotes in order to support spaces in file/folder names */
-      path = g_strconcat ("\"", gtk_entry_get_text (GTK_ENTRY (dialog->custom_entry)), "\"", NULL);
+      custom_command = gtk_entry_get_text (GTK_ENTRY (dialog->custom_entry));
 
       /* determine the name of the custom command */
-      name = g_path_get_basename (path);
+      name = g_path_get_basename (custom_command);
 
       /* try to add an application for the custom command */
-      app_info = g_app_info_create_from_commandline (path, name, G_APP_INFO_CREATE_NONE, &error);
+      app_info = g_app_info_create_from_commandline (custom_command, name, G_APP_INFO_CREATE_NONE, &error);
+
+      /* cleanup */
+      g_free (name);
 
       /* verify the application */
       if (G_UNLIKELY (app_info == NULL))
         {
           /* display an error to the user */
-          thunar_dialogs_show_error (GTK_WIDGET (dialog), error, _("Failed to add new application \"%s\""), path);
+          thunar_dialogs_show_error (GTK_WIDGET (dialog), error, _("Failed to add new application \"%s\""), custom_command);
 
           /* release the error */
           g_error_free (error);
+          return;
         }
 
-      /* cleanup */
-      g_free (path);
-      g_free (name);
+      /* Check if that application already exists in our list */
+      all_apps = g_app_info_get_all ();
+      for (lp = all_apps; lp != NULL; lp = lp->next)
+        {
+          if( g_strcmp0 (g_app_info_get_name (lp->data), g_app_info_get_name (app_info)) == 0 &&
+              g_strcmp0 (g_app_info_get_commandline (lp->data), g_app_info_get_commandline (app_info)) == 0)
+            {
+              /* Re-use existing app-info instead of adding the same one again */
+              g_object_unref (app_info);
+              app_info = g_object_ref (lp->data);
+              break;
+            }
+        }
+      g_list_free_full (all_apps, g_object_unref);
     }
 
   /* verify that we have a valid application */
@@ -745,6 +760,7 @@ thunar_chooser_dialog_browse_clicked (GtkWidget           *button,
   GtkFileFilter *filter;
   GtkWidget     *chooser;
   gchar         *filename;
+  gchar         *filename_escaped;
   gchar         *s;
 
   chooser = gtk_file_chooser_dialog_new (_("Select an Application"),
@@ -842,7 +858,9 @@ thunar_chooser_dialog_browse_clicked (GtkWidget           *button,
   if (gtk_dialog_run (GTK_DIALOG (chooser)) == GTK_RESPONSE_ACCEPT)
     {
       filename = gtk_file_chooser_get_filename (GTK_FILE_CHOOSER (chooser));
-      gtk_entry_set_text (GTK_ENTRY (dialog->custom_entry), filename);
+      filename_escaped = thunar_g_strescape (filename);
+      gtk_entry_set_text (GTK_ENTRY (dialog->custom_entry), filename_escaped);
+      g_free (filename_escaped);
       g_free (filename);
     }
 
