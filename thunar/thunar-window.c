@@ -2539,7 +2539,9 @@ static void
 thunar_window_action_close_tab (ThunarWindow *window,
                                 GtkWidget    *menu_item)
 {
-  if (window->view != NULL)
+  if (gtk_notebook_get_n_pages (GTK_NOTEBOOK (window->notebook)) == 1)
+    gtk_widget_destroy (GTK_WIDGET (window));
+  else if (window->view != NULL)
     gtk_widget_destroy (window->view);
 }
 
@@ -4070,17 +4072,20 @@ thunar_window_button_press_event (GtkWidget      *view,
 
   _thunar_return_val_if_fail (THUNAR_IS_WINDOW (window), FALSE);
 
-  if (G_UNLIKELY (event->button == 8))
+  if (event->type == GDK_BUTTON_PRESS)
     {
-      action_entry = get_action_entry (THUNAR_WINDOW_ACTION_BACK);
-      ((void(*)(GtkWindow*))action_entry->callback)(GTK_WINDOW (window));
-      return GDK_EVENT_STOP;
-    }
-  if (G_UNLIKELY (event->button == 9))
-    {
-      action_entry = get_action_entry (THUNAR_WINDOW_ACTION_FORWARD);
-      ((void(*)(GtkWindow*))action_entry->callback)(GTK_WINDOW (window));
-      return GDK_EVENT_STOP;
+      if (G_UNLIKELY (event->button == 8))
+        {
+          action_entry = get_action_entry (THUNAR_WINDOW_ACTION_BACK);
+          ((void(*)(GtkWindow*))action_entry->callback)(GTK_WINDOW (window));
+          return GDK_EVENT_STOP;
+        }
+      if (G_UNLIKELY (event->button == 9))
+        {
+          action_entry = get_action_entry (THUNAR_WINDOW_ACTION_FORWARD);
+          ((void(*)(GtkWindow*))action_entry->callback)(GTK_WINDOW (window));
+          return GDK_EVENT_STOP;
+        }
     }
 
   return GDK_EVENT_PROPAGATE;
