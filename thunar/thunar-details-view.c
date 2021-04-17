@@ -112,11 +112,12 @@ static void         thunar_details_view_append_menu_items       (ThunarStandardV
                                                                  GtkAccelGroup          *accel_group);
 
 
-
 struct _ThunarDetailsViewClass
 {
   ThunarStandardViewClass __parent__;
 };
+
+
 
 struct _ThunarDetailsView
 {
@@ -136,13 +137,14 @@ struct _ThunarDetailsView
 
   /* event source id for thunar_details_view_zoom_level_changed_reload_fixed_columns */
   guint idle_id;
+
 };
 
 
 
 static XfceGtkActionEntry thunar_details_view_action_entries[] =
 {
-    { THUNAR_DETAILS_VIEW_ACTION_CONFIGURE_COLUMNS, "<Actions>/ThunarStandardView/configure-columns", "", XFCE_GTK_MENU_ITEM , N_ ("Configure _Columns..."), N_("Configure the columns in the detailed list view"), NULL, G_CALLBACK (thunar_show_column_editor), },
+    { THUNAR_DETAILS_VIEW_ACTION_CONFIGURE_COLUMNS,  "<Actions>/ThunarStandardView/configure-columns", "", XFCE_GTK_MENU_ITEM , N_ ("Configure _Columns..."), N_("Configure the columns in the detailed list view"), NULL, G_CALLBACK (thunar_show_column_editor), },
 };
 
 #define get_action_entry(id) xfce_gtk_get_action_entry_by_id(thunar_details_view_action_entries,G_N_ELEMENTS(thunar_details_view_action_entries),id)
@@ -714,27 +716,15 @@ thunar_details_view_button_press_event (GtkTreeView       *tree_view,
         }
       else
         {
-          if (column != name_column)
+          /* select the clicked path if necessary */
+          if (!gtk_tree_selection_path_is_selected (selection, path))
             {
-              /* if the clicked path is not selected, unselect all other paths */
-              if (!gtk_tree_selection_path_is_selected (selection, path))
-                gtk_tree_selection_unselect_all (selection);
-
-              /* queue the menu popup */
-              thunar_standard_view_queue_popup (THUNAR_STANDARD_VIEW (details_view), event);
+              gtk_tree_selection_unselect_all (selection);
+              gtk_tree_selection_select_path (selection, path);
             }
-          else
-            {
-              /* select the clicked path if necessary */
-              if (!gtk_tree_selection_path_is_selected (selection, path))
-                {
-                  gtk_tree_selection_unselect_all (selection);
-                  gtk_tree_selection_select_path (selection, path);
-                }
 
-              /* show the context menu */
-              thunar_standard_view_context_menu (THUNAR_STANDARD_VIEW (details_view));
-            }
+          /* show the context menu */
+          thunar_standard_view_queue_popup (THUNAR_STANDARD_VIEW (details_view), event);
           gtk_tree_path_free (path);
         }
 
@@ -940,9 +930,7 @@ static void
 thunar_details_view_connect_accelerators (ThunarStandardView *standard_view,
                                           GtkAccelGroup      *accel_group)
 {
-  ThunarDetailsView *details_view = THUNAR_DETAILS_VIEW (standard_view);
-
-  _thunar_return_if_fail (THUNAR_IS_DETAILS_VIEW (details_view));
+  _thunar_return_if_fail (THUNAR_IS_DETAILS_VIEW (standard_view));
 
   xfce_gtk_accel_map_add_entries (thunar_details_view_action_entries, G_N_ELEMENTS (thunar_details_view_action_entries));
   xfce_gtk_accel_group_connect_action_entries (accel_group,

@@ -791,6 +791,7 @@ thunar_file_monitor (GFileMonitor     *monitor,
 {
   ThunarFile *file = THUNAR_FILE (user_data);
   ThunarFile *other_file;
+  gboolean    reload_ok = TRUE;
 
   _thunar_return_if_fail (G_IS_FILE_MONITOR (monitor));
   _thunar_return_if_fail (G_IS_FILE (event_path));
@@ -829,11 +830,11 @@ thunar_file_monitor (GFileMonitor     *monitor,
 
           other_file = thunar_file_cache_lookup (other_path);
           if (other_file)
-              thunar_file_reload (other_file);
+              reload_ok = thunar_file_reload (other_file);
           else
               other_file = thunar_file_get (other_path, NULL);
 
-          if (other_file != NULL)
+          if (reload_ok && other_file != NULL)
             {
               /* notify the thumbnail cache that we can now also move the thumbnail */
               thunar_file_move_thumbnail_cache_file (event_path, other_path);
@@ -2106,6 +2107,9 @@ thunar_file_get_date (const ThunarFile  *file,
       break;
     case THUNAR_FILE_DATE_CHANGED:
       attribute = G_FILE_ATTRIBUTE_TIME_CHANGED;
+      break;
+    case THUNAR_FILE_DATE_CREATED:
+      attribute = G_FILE_ATTRIBUTE_TIME_CREATED;
       break;
     case THUNAR_FILE_DATE_MODIFIED:
       attribute = G_FILE_ATTRIBUTE_TIME_MODIFIED;
@@ -3958,9 +3962,7 @@ thunar_file_unwatch (ThunarFile *file)
  * You must be able to handle the case that @file is
  * destroyed during the reload call.
  *
- * Return value: As this function can be used as a callback function
- * for thunar_file_reload_idle, it will always return FALSE to prevent
- * being called repeatedly.
+ * Return value: TRUE on success, FALSE otherwise
  **/
 gboolean
 thunar_file_reload (ThunarFile *file)
@@ -3980,6 +3982,17 @@ thunar_file_reload (ThunarFile *file)
   /* ... and tell others */
   thunar_file_changed (file);
 
+  return TRUE;
+}
+
+
+
+static gboolean
+thunar_file_reload_cb_once (gpointer user_data)
+{
+  ThunarFile *file = user_data;
+
+  thunar_file_reload (file);
   return FALSE;
 }
 
@@ -3989,7 +4002,7 @@ thunar_file_reload (ThunarFile *file)
  * thunar_file_reload_idle:
  * @file : a #ThunarFile instance.
  *
- * Schedules a reload of the @file by calling thunar_file_reload
+ * Schedules a single reload of the @file by calling thunar_file_reload
  * when idle.
  *
  **/
@@ -3998,7 +4011,7 @@ thunar_file_reload_idle (ThunarFile *file)
 {
   _thunar_return_if_fail (THUNAR_IS_FILE (file));
 
-  g_idle_add ((GSourceFunc) thunar_file_reload, file);
+  g_idle_add (thunar_file_reload_cb_once, file);
 }
 
 
@@ -4018,7 +4031,7 @@ thunar_file_reload_idle_unref (ThunarFile *file)
   _thunar_return_if_fail (THUNAR_IS_FILE (file));
 
   g_idle_add_full (G_PRIORITY_DEFAULT_IDLE,
-                   (GSourceFunc) thunar_file_reload,
+                   thunar_file_reload_cb_once,
                    file,
                    (GDestroyNotify) g_object_unref);
 }

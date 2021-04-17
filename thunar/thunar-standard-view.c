@@ -168,6 +168,7 @@ static void                 thunar_standard_view_set_selected_files_view    (Thu
 static void                 thunar_standard_view_select_all_files           (ThunarView               *view);
 static void                 thunar_standard_view_select_by_pattern          (ThunarView               *view);
 static void                 thunar_standard_view_selection_invert           (ThunarView               *view);
+static void                 thunar_standard_view_unselect_all_files         (ThunarView               *view);
 static GClosure            *thunar_standard_view_new_files_closure          (ThunarStandardView       *standard_view,
                                                                              GtkWidget                *source_view);
 static void                 thunar_standard_view_new_files                  (ThunarStandardView       *standard_view,
@@ -223,13 +224,9 @@ static void                 thunar_standard_view_drag_data_delete           (Gtk
 static void                 thunar_standard_view_drag_end                   (GtkWidget                *view,
                                                                              GdkDragContext           *context,
                                                                              ThunarStandardView       *standard_view);
-static void                 thunar_standard_view_row_deleted                (ThunarListModel          *model,
-                                                                             GtkTreePath              *path,
-                                                                             ThunarStandardView       *standard_view);
 static void                 thunar_standard_view_select_after_row_deleted   (ThunarListModel          *model,
                                                                              GtkTreePath              *path,
                                                                              ThunarStandardView       *standard_view);
-static gboolean             thunar_standard_view_restore_selection_idle     (ThunarStandardView       *standard_view);
 static void                 thunar_standard_view_row_changed                (ThunarListModel          *model,
                                                                              GtkTreePath              *path,
                                                                              GtkTreeIter              *iter,
@@ -268,7 +265,16 @@ static void                 thunar_standard_view_size_allocate              (Thu
 static void                 thunar_standard_view_connect_accelerators       (ThunarStandardView       *standard_view);
 static void                 thunar_standard_view_disconnect_accelerators    (ThunarStandardView       *standard_view);
 
-
+static void                 thunar_standard_view_action_sort_by_name               (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_action_sort_by_type               (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_action_sort_by_date               (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_action_sort_by_size               (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_action_sort_ascending             (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_action_sort_descending            (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_set_sort_column                   (ThunarStandardView       *standard_view, 
+                                                                                    ThunarColumn column);
+static void                 thunar_standard_view_toggle_sort_order                 (ThunarStandardView       *standard_view);
+static void                 thunar_standard_view_store_sort_column                 (ThunarStandardView       *standard_view);
 
 struct _ThunarStandardViewPrivate
 {
@@ -338,16 +344,27 @@ struct _ThunarStandardViewPrivate
   /* file insert signal */
   gulong                  row_changed_id;
 
-  /* Tree path for restoring the selection after selecting and
-   * deleting an item */
-  GtkTreePath            *selection_before_delete;
+  /* current sort column ID */
+  ThunarColumn            sort_column;
+
+  /* current sort_order (GTK_SORT_ASCENDING || GTK_SORT_DESCENDING) */
+  GtkSortType             sort_order;
 };
 
 static XfceGtkActionEntry thunar_standard_view_action_entries[] =
 {
-    { THUNAR_STANDARD_VIEW_ACTION_SELECT_ALL_FILES,  "<Actions>/ThunarStandardView/select-all-files",   "<Primary>a", XFCE_GTK_MENU_ITEM, N_ ("Select _all Files"),     N_ ("Select all files in this window"),                   NULL, G_CALLBACK (thunar_standard_view_select_all_files), },
-    { THUNAR_STANDARD_VIEW_ACTION_SELECT_BY_PATTERN, "<Actions>/ThunarStandardView/select-by-pattern",  "<Primary>s", XFCE_GTK_MENU_ITEM, N_ ("Select _by Pattern..."), N_ ("Select all files that match a certain pattern"),     NULL, G_CALLBACK (thunar_standard_view_select_by_pattern), },
-    { THUNAR_STANDARD_VIEW_ACTION_INVERT_SELECTION,  "<Actions>/ThunarStandardView/invert-selection",   "",           XFCE_GTK_MENU_ITEM, N_ ("_Invert Selection"),     N_ ("Select all files but not those currently selected"), NULL, G_CALLBACK (thunar_standard_view_selection_invert), },
+    { THUNAR_STANDARD_VIEW_ACTION_SELECT_ALL_FILES,   "<Actions>/ThunarStandardView/select-all-files",   "<Primary>a", XFCE_GTK_MENU_ITEM,       N_ ("Select _all Files"),     N_ ("Select all files in this window"),                   NULL, G_CALLBACK (thunar_standard_view_select_all_files),       },
+    { THUNAR_STANDARD_VIEW_ACTION_SELECT_BY_PATTERN,  "<Actions>/ThunarStandardView/select-by-pattern",  "<Primary>s", XFCE_GTK_MENU_ITEM,       N_ ("Select _by Pattern..."), N_ ("Select all files that match a certain pattern"),     NULL, G_CALLBACK (thunar_standard_view_select_by_pattern),      },
+    { THUNAR_STANDARD_VIEW_ACTION_INVERT_SELECTION,   "<Actions>/ThunarStandardView/invert-selection",   "",           XFCE_GTK_MENU_ITEM,       N_ ("_Invert Selection"),     N_ ("Select all files but not those currently selected"), NULL, G_CALLBACK (thunar_standard_view_selection_invert),       },
+    { THUNAR_STANDARD_VIEW_ACTION_UNSELECT_ALL_FILES, "<Actions>/ThunarStandardView/unselect-all-files", "Escape",     XFCE_GTK_MENU_ITEM,       N_ ("U_nselect all Files"),   N_ ("Unselect all files in this window"),                 NULL, G_CALLBACK (thunar_standard_view_unselect_all_files),     },
+    { THUNAR_STANDARD_VIEW_ACTION_ARRANGE_ITEMS_MENU, "<Actions>/ThunarStandardView/arrange-items-menu", "",           XFCE_GTK_MENU_ITEM,       N_ ("Arran_ge Items"),        NULL,                                                     NULL, G_CALLBACK (NULL),                                        },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_ORDER_TOGGLE,  "<Actions>/ThunarStandardView/toggle-sort-order",  "",           XFCE_GTK_MENU_ITEM ,      N_ ("Toggle sort direction"), N_("Toggle Ascending/Descending sort order"),             NULL, G_CALLBACK (thunar_standard_view_toggle_sort_order),      },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_BY_NAME,       "<Actions>/ThunarStandardView/sort-by-name",       "",           XFCE_GTK_RADIO_MENU_ITEM, N_ ("By _Name"),              N_ ("Keep items sorted by their name"),                   NULL, G_CALLBACK (thunar_standard_view_action_sort_by_name),    },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_BY_SIZE,       "<Actions>/ThunarStandardView/sort-by-size",       "",           XFCE_GTK_RADIO_MENU_ITEM, N_ ("By _Size"),              N_ ("Keep items sorted by their size"),                   NULL, G_CALLBACK (thunar_standard_view_action_sort_by_size),    },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_BY_TYPE,       "<Actions>/ThunarStandardView/sort-by-type",       "",           XFCE_GTK_RADIO_MENU_ITEM, N_ ("By _Type"),              N_ ("Keep items sorted by their type"),                   NULL, G_CALLBACK (thunar_standard_view_action_sort_by_type),    },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_BY_MTIME,      "<Actions>/ThunarStandardView/sort-by-mtime",      "",           XFCE_GTK_RADIO_MENU_ITEM, N_ ("By Modification _Date"), N_ ("Keep items sorted by their modification date"),      NULL, G_CALLBACK (thunar_standard_view_action_sort_by_date),    },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_ASCENDING,     "<Actions>/ThunarStandardView/sort-ascending",     "",           XFCE_GTK_RADIO_MENU_ITEM, N_ ("_Ascending"),            N_ ("Sort items in ascending order"),                     NULL, G_CALLBACK (thunar_standard_view_action_sort_ascending),  },
+    { THUNAR_STANDARD_VIEW_ACTION_SORT_DESCENDING,    "<Actions>/ThunarStandardView/sort-descending",    "",           XFCE_GTK_RADIO_MENU_ITEM, N_ ("_Descending"),           N_ ("Sort items in descending order"),                    NULL, G_CALLBACK (thunar_standard_view_action_sort_descending), },
 };
 
 #define get_action_entry(id) xfce_gtk_get_action_entry_by_id(thunar_standard_view_action_entries,G_N_ELEMENTS(thunar_standard_view_action_entries),id)
@@ -380,6 +397,62 @@ G_DEFINE_ABSTRACT_TYPE_WITH_CODE (ThunarStandardView, thunar_standard_view, GTK_
     G_ADD_PRIVATE (ThunarStandardView))
 
 
+static void
+thunar_standard_view_action_sort_ascending (ThunarStandardView *standard_view)
+{
+
+  if (standard_view->priv->sort_order == GTK_SORT_DESCENDING)
+    thunar_standard_view_set_sort_column (standard_view, standard_view->priv->sort_column);
+}
+
+static void
+thunar_standard_view_action_sort_descending (ThunarStandardView *standard_view)
+{
+  if (standard_view->priv->sort_order == GTK_SORT_ASCENDING)
+    thunar_standard_view_set_sort_column (standard_view, standard_view->priv->sort_column);
+}
+
+static void
+thunar_standard_view_set_sort_column (ThunarStandardView *standard_view, ThunarColumn column)
+{
+  GtkSortType order = standard_view->priv->sort_order;
+
+  if (standard_view->priv->sort_column == column)
+    order = (order == GTK_SORT_ASCENDING ? GTK_SORT_DESCENDING: GTK_SORT_ASCENDING);
+
+  gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (standard_view->model), column, order);
+}
+
+
+static void
+thunar_standard_view_action_sort_by_name (ThunarStandardView *standard_view)
+{
+  thunar_standard_view_set_sort_column (standard_view, THUNAR_COLUMN_NAME);
+}
+
+static void
+thunar_standard_view_action_sort_by_size (ThunarStandardView *standard_view)
+{
+  thunar_standard_view_set_sort_column (standard_view, THUNAR_COLUMN_SIZE);
+}
+
+static void
+thunar_standard_view_action_sort_by_type (ThunarStandardView *standard_view)
+{
+  thunar_standard_view_set_sort_column (standard_view, THUNAR_COLUMN_TYPE);
+}
+
+static void
+thunar_standard_view_action_sort_by_date (ThunarStandardView *standard_view)
+{
+  thunar_standard_view_set_sort_column (standard_view, THUNAR_COLUMN_DATE_MODIFIED);
+}
+
+static void
+thunar_standard_view_toggle_sort_order (ThunarStandardView *standard_view)
+{
+  thunar_standard_view_set_sort_column (standard_view, standard_view->priv->sort_column);
+}
 
 static void
 thunar_standard_view_class_init (ThunarStandardViewClass *klass)
@@ -596,7 +669,6 @@ thunar_standard_view_init (ThunarStandardView *standard_view)
 
   /* setup the list model */
   standard_view->model = thunar_list_model_new ();
-  g_signal_connect (G_OBJECT (standard_view->model), "row-deleted", G_CALLBACK (thunar_standard_view_row_deleted), standard_view);
   g_signal_connect_after (G_OBJECT (standard_view->model), "row-deleted", G_CALLBACK (thunar_standard_view_select_after_row_deleted), standard_view);
   standard_view->priv->row_changed_id = g_signal_connect (G_OBJECT (standard_view->model), "row-changed", G_CALLBACK (thunar_standard_view_row_changed), standard_view);
   g_signal_connect (G_OBJECT (standard_view->model), "rows-reordered", G_CALLBACK (thunar_standard_view_rows_reordered), standard_view);
@@ -647,6 +719,17 @@ thunar_standard_view_init (ThunarStandardView *standard_view)
   standard_view->accel_group = NULL;
 }
 
+static void thunar_standard_view_store_sort_column  (ThunarStandardView *standard_view)
+{
+  GtkSortType      sort_order;
+  gint             sort_column;
+
+  if (gtk_tree_sortable_get_sort_column_id (GTK_TREE_SORTABLE (standard_view->model), &sort_column, &sort_order))
+    {
+      standard_view->priv->sort_column     = sort_column;
+      standard_view->priv->sort_order      = sort_order;
+    }
+}
 
 
 static GObject*
@@ -984,6 +1067,8 @@ thunar_standard_view_realize (GtkWidget *widget)
   /* apply the thumbnail frame preferences after icon_factory got initialized */
   exo_binding_new (G_OBJECT (standard_view->preferences), "misc-thumbnail-draw-frames", G_OBJECT (standard_view), "thumbnail-draw-frames");
 
+  /* store sort information to keep indicators in menu in sync */
+  thunar_standard_view_store_sort_column (standard_view);
 }
 
 
@@ -2169,6 +2254,22 @@ thunar_standard_view_selection_invert (ThunarView *view)
 
 
 
+static void
+thunar_standard_view_unselect_all_files (ThunarView *view)
+{
+  ThunarStandardView *standard_view = THUNAR_STANDARD_VIEW (view);
+
+  _thunar_return_if_fail (THUNAR_IS_STANDARD_VIEW (standard_view));
+
+  /* grab the focus to the view */
+  gtk_widget_grab_focus (GTK_WIDGET (standard_view));
+
+  /* unselect all files in the real view */
+  (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->unselect_all) (standard_view);
+}
+
+
+
 static GClosure*
 thunar_standard_view_new_files_closure (ThunarStandardView *standard_view,
                                         GtkWidget          *source_view)
@@ -2345,7 +2446,7 @@ thunar_standard_view_scroll_event (GtkWidget          *view,
   else
     {
       g_debug ("GDK_SCROLL_SMOOTH scrolling event with no delta happened");
-      return TRUE;
+      return FALSE;
     }
 
   if (G_UNLIKELY (scrolling_direction == GDK_SCROLL_LEFT || scrolling_direction == GDK_SCROLL_RIGHT))
@@ -2922,54 +3023,10 @@ thunar_standard_view_drag_end (GtkWidget          *view,
 
 
 
-static void
-thunar_standard_view_row_deleted (ThunarListModel    *model,
-                                  GtkTreePath        *path,
-                                  ThunarStandardView *standard_view)
-{
-  GtkTreePath *path_copy;
-  GList       *selected_items;
-
-  _thunar_return_if_fail (THUNAR_IS_LIST_MODEL (model));
-  _thunar_return_if_fail (path != NULL);
-  _thunar_return_if_fail (THUNAR_IS_STANDARD_VIEW (standard_view));
-  _thunar_return_if_fail (standard_view->model == model);
-
-  /* Get tree paths of selected files */
-  selected_items = (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->get_selected_items) (standard_view);
-
-  /* Do nothing if the deleted row is not selected or there is more than one file selected */
-  if (G_UNLIKELY (g_list_find_custom (selected_items, path, (GCompareFunc) gtk_tree_path_compare) == NULL || g_list_length (selected_items) != 1))
-    {
-      g_list_free_full (selected_items, (GDestroyNotify) gtk_tree_path_free);
-      return;
-    }
-
-  /* Create a copy the path (we're not allowed to modify it in this handler) */
-  path_copy = gtk_tree_path_copy (path);
-
-  /* Remember the selected path so that it can be restored after the row has
-   * been removed. If the first row is removed, select the first row after the
-   * removal, if any other row is removed, select the row before that one */
-  if (G_LIKELY (gtk_tree_path_prev (path_copy)))
-    {
-      standard_view->priv->selection_before_delete = path_copy;
-    }
-  else
-    {
-      standard_view->priv->selection_before_delete = gtk_tree_path_new_first ();
-      gtk_tree_path_free (path_copy);
-    }
-
-  /* Free path list */
-  g_list_free_full (selected_items, (GDestroyNotify) gtk_tree_path_free);
-}
-
-
-
 static gboolean
-thunar_standard_view_restore_selection_idle (ThunarStandardView *standard_view)
+thunar_standard_view_restore_selection_idle (gpointer user_data)
 {
+  ThunarStandardView *standard_view = user_data;
   GtkAdjustment *hadjustment;
   GtkAdjustment *vadjustment;
   gdouble        h, v, hl, hu, vl, vu;
@@ -3015,9 +3072,7 @@ thunar_standard_view_rows_reordered (ThunarListModel    *model,
    * after letting row changes accumulate a bit */
   if (standard_view->priv->restore_selection_idle_id == 0)
     standard_view->priv->restore_selection_idle_id =
-      g_timeout_add (50,
-                     (GSourceFunc) thunar_standard_view_restore_selection_idle,
-                     standard_view);
+      g_timeout_add (50, thunar_standard_view_restore_selection_idle, standard_view);
 }
 
 
@@ -3061,25 +3116,10 @@ thunar_standard_view_select_after_row_deleted (ThunarListModel    *model,
                                                GtkTreePath        *path,
                                                ThunarStandardView *standard_view)
 {
-  _thunar_return_if_fail (THUNAR_IS_LIST_MODEL (model));
   _thunar_return_if_fail (path != NULL);
   _thunar_return_if_fail (THUNAR_IS_STANDARD_VIEW (standard_view));
-  _thunar_return_if_fail (standard_view->model == model);
 
-  /* Check if there was only one file selected before the row was deleted. The
-   * path is set by thunar_standard_view_row_deleted() if this is the case */
-  if (G_LIKELY (standard_view->priv->selection_before_delete != NULL))
-    {
-      /* Restore the selection by selecting either the row before or the new first row */
-      (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->select_path) (standard_view, standard_view->priv->selection_before_delete);
-
-      /* place the cursor on the selected path */
-      (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->set_cursor) (standard_view, standard_view->priv->selection_before_delete, FALSE);
-
-      /* Free the tree path */
-      gtk_tree_path_free (standard_view->priv->selection_before_delete);
-      standard_view->priv->selection_before_delete = NULL;
-    }
+  (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->set_cursor) (standard_view, path, FALSE);
 }
 
 
@@ -3124,6 +3164,8 @@ thunar_standard_view_sort_column_changed (GtkTreeSortable    *tree_sortable,
   /* determine the new sort column and sort order, and save them */
   if (gtk_tree_sortable_get_sort_column_id (tree_sortable, &sort_column, &sort_order))
     {
+      thunar_standard_view_store_sort_column (standard_view);
+
       if (standard_view->priv->directory_specific_settings)
         {
           const gchar *sort_column_name;
@@ -3797,9 +3839,35 @@ thunar_standard_view_append_menu_items (ThunarStandardView *standard_view,
                                         GtkMenu            *menu,
                                         GtkAccelGroup      *accel_group)
 {
+
+  GtkWidget  *item;
+  GtkWidget  *submenu;
+
   _thunar_return_if_fail (THUNAR_IS_STANDARD_VIEW (standard_view));
 
-  (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->append_menu_items) (standard_view, menu, accel_group);
+  item = xfce_gtk_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_ARRANGE_ITEMS_MENU), NULL, GTK_MENU_SHELL (menu));
+  submenu =  gtk_menu_new();
+  xfce_gtk_toggle_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_BY_NAME), G_OBJECT (standard_view),
+                                                   standard_view->priv->sort_column == THUNAR_COLUMN_NAME, GTK_MENU_SHELL (submenu));
+  xfce_gtk_toggle_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_BY_SIZE), G_OBJECT (standard_view),
+                                                   standard_view->priv->sort_column == THUNAR_COLUMN_SIZE, GTK_MENU_SHELL (submenu));
+  xfce_gtk_toggle_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_BY_TYPE), G_OBJECT (standard_view),
+                                                   standard_view->priv->sort_column == THUNAR_COLUMN_TYPE, GTK_MENU_SHELL (submenu));
+  xfce_gtk_toggle_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_BY_MTIME), G_OBJECT (standard_view),
+                                                   standard_view->priv->sort_column == THUNAR_COLUMN_DATE_MODIFIED, GTK_MENU_SHELL (submenu));
+  xfce_gtk_menu_append_seperator (GTK_MENU_SHELL (submenu));
+  xfce_gtk_toggle_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_ASCENDING), G_OBJECT (standard_view),
+                                                   standard_view->priv->sort_order == GTK_SORT_ASCENDING, GTK_MENU_SHELL (submenu));
+  xfce_gtk_toggle_menu_item_new_from_action_entry (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_DESCENDING), G_OBJECT (standard_view),
+                                                   standard_view->priv->sort_order == GTK_SORT_DESCENDING, GTK_MENU_SHELL (submenu));
+  xfce_gtk_menu_append_seperator (GTK_MENU_SHELL (submenu));
+  xfce_gtk_menu_item_new_from_action_entry        (get_action_entry (THUNAR_STANDARD_VIEW_ACTION_SORT_ORDER_TOGGLE), G_OBJECT (standard_view),
+                                                   GTK_MENU_SHELL (submenu));
+  gtk_menu_item_set_submenu (GTK_MENU_ITEM (item), GTK_WIDGET (submenu));
+  gtk_widget_show (item);
+
+  if (THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->append_menu_items != NULL)
+    (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->append_menu_items) (standard_view, menu, accel_group);
 }
 
 
@@ -3814,14 +3882,21 @@ thunar_standard_view_append_menu_items (ThunarStandardView *standard_view,
  *
  * Return value: (transfer none): The added #GtkMenuItem
  **/
-void
+GtkWidget *
 thunar_standard_view_append_menu_item (ThunarStandardView      *standard_view,
                                        GtkMenu                 *menu,
                                        ThunarStandardViewAction action)
 {
-  _thunar_return_if_fail (THUNAR_IS_STANDARD_VIEW (standard_view));
+  GtkWidget *item;
 
-  xfce_gtk_menu_item_new_from_action_entry (get_action_entry (action), G_OBJECT (standard_view), GTK_MENU_SHELL (menu));
+  _thunar_return_val_if_fail (THUNAR_IS_STANDARD_VIEW (standard_view), NULL);
+
+  item = xfce_gtk_menu_item_new_from_action_entry (get_action_entry (action), G_OBJECT (standard_view), GTK_MENU_SHELL (menu));
+
+  if (action == THUNAR_STANDARD_VIEW_ACTION_UNSELECT_ALL_FILES)
+    gtk_widget_set_sensitive (item, standard_view->priv->selected_files != NULL);
+
+  return item;
 }
 
 
@@ -3848,7 +3923,8 @@ thunar_standard_view_connect_accelerators (ThunarStandardView *standard_view)
                                                standard_view);
 
   /* as well append accelerators of derived widgets */
-  (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->connect_accelerators) (standard_view, standard_view->accel_group);
+  if (THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->connect_accelerators != NULL)
+    (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->connect_accelerators) (standard_view, standard_view->accel_group);
 }
 
 
@@ -3874,7 +3950,8 @@ thunar_standard_view_disconnect_accelerators (ThunarStandardView *standard_view)
                                                G_N_ELEMENTS (thunar_standard_view_action_entries));
 
   /* as well disconnect accelerators of derived widgets */
-  (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->disconnect_accelerators) (standard_view, standard_view->accel_group);
+  if (THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->disconnect_accelerators != NULL)
+    (*THUNAR_STANDARD_VIEW_GET_CLASS (standard_view)->disconnect_accelerators) (standard_view, standard_view->accel_group);
 
   /* and release the accel group */
   g_object_unref (standard_view->accel_group);

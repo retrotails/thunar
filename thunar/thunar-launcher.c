@@ -49,6 +49,7 @@
 #include <thunar/thunar-shortcuts-pane.h>
 #include <thunar/thunar-simple-job.h>
 #include <thunar/thunar-device-monitor.h>
+#include <thunar/thunar-tree-view.h>
 #include <thunar/thunar-util.h>
 #include <thunar/thunar-window.h>
 
@@ -87,6 +88,15 @@ typedef struct _ThunarLauncherPokeData ThunarLauncherPokeData;
 
 
 
+/* Signal identifiers */
+enum
+{
+  DEVICE_OPERATION_STARTED,
+  DEVICE_OPERATION_FINISHED,
+  NEW_FILES_CREATED,
+  LAST_SIGNAL,
+};
+
 /* Property identifiers */
 enum
 {
@@ -94,8 +104,8 @@ enum
   PROP_CURRENT_DIRECTORY,
   PROP_SELECTED_FILES,
   PROP_WIDGET,
-  PROP_SELECT_FILES_CLOSURE,
   PROP_SELECTED_DEVICE,
+  PROP_SELECTED_LOCATION,
   N_PROPERTIES
 };
 
@@ -140,6 +150,12 @@ static void                    thunar_launcher_poke_device_finish         (Thuna
                                                                            GError                         *error,
                                                                            gpointer                        user_data,
                                                                            gboolean                        cancelled);
+static void                    thunar_launcher_poke_location_finish       (ThunarBrowser                  *browser,
+                                                                           GFile                          *location,
+                                                                           ThunarFile                     *file,
+                                                                           ThunarFile                     *target_file,
+                                                                           GError                         *error,
+                                                                           gpointer                        user_data);
 static void                    thunar_launcher_poke_files_finish          (ThunarBrowser                  *browser,
                                                                            ThunarFile                     *file,
                                                                            ThunarFile                     *target_file,
@@ -147,7 +163,9 @@ static void                    thunar_launcher_poke_files_finish          (Thuna
                                                                            gpointer                        user_data);
 static ThunarLauncherPokeData *thunar_launcher_poke_data_new              (GList                          *files_to_poke,
                                                                            GAppInfo                       *application_to_use,
-                                                                           ThunarLauncherFolderOpenAction  folder_open_action);
+                                                                           ThunarLauncherFolderOpenAction  folder_open_action,
+                                                                           GFile                          *location_to_poke,
+                                                                           ThunarDevice                   *device_to_poke);
 static void                    thunar_launcher_poke_data_free             (ThunarLauncherPokeData         *data);
 static void                    thunar_launcher_widget_destroyed           (ThunarLauncher                 *launcher,
                                                                            GtkWidget                      *widget);
@@ -184,6 +202,8 @@ static void                    thunar_launcher_action_create_folder       (Thuna
 static void                    thunar_launcher_action_create_document     (ThunarLauncher                 *launcher,
                                                                            GtkWidget                      *menu_item);
 static GtkWidget              *thunar_launcher_create_document_submenu_new(ThunarLauncher                 *launcher);
+static void                    thunar_launcher_new_files_created          (ThunarLauncher                 *launcher,
+                                                                           GList                          *new_thunar_files);
 
 
 
@@ -197,8 +217,10 @@ struct _ThunarLauncher
   GObject __parent__;
 
   ThunarFile             *current_directory;
-  GList                  *files_to_process;
-  ThunarDevice           *device_to_process;
+
+  GList                  *files_to_process;    /* List of thunar-files to work with */
+  ThunarDevice           *device_to_process;   /* Device to work with */
+  GFile			 *location_to_process; /* Location to work with (might be not reachable) */
 
   gint                    n_files_to_process;
   gint                    n_directories_to_process;
@@ -211,7 +233,8 @@ struct _ThunarLauncher
   ThunarFile             *single_folder;
   ThunarFile             *parent_folder;
 
-  GClosure               *select_files_closure;
+  /* closure invoked whenever launcher creates new files (create, paste, rename, etc) */
+  GClosure               *new_files_created_closure;
 
   ThunarPreferences      *preferences;
 
@@ -223,10 +246,14 @@ static GQuark thunar_launcher_appinfo_quark;
 static GQuark thunar_launcher_device_quark;
 static GQuark thunar_launcher_file_quark;
 
+static guint launcher_signals[LAST_SIGNAL];
+
 struct _ThunarLauncherPokeData
 {
-  GList                          *files_to_poke;
-  GList                          *files_poked;
+  GList                          *files_to_poke; /* List of thunar-files */
+  GList                          *files_poked;   /* List of thunar-files */
+  GFile                          *location_to_poke;
+  ThunarDevice                   *device_to_poke;
   GAppInfo                       *application_to_use;
   ThunarLauncherFolderOpenAction  folder_open_action;
 };
@@ -255,7 +282,7 @@ static XfceGtkActionEntry thunar_launcher_action_entries[] =
     { THUNAR_LAUNCHER_ACTION_CREATE_DOCUMENT,  "<Actions>/ThunarStandardView/create-document",     "",                  XFCE_GTK_IMAGE_MENU_ITEM, N_ ("Create _Document"),                N_ ("Create a new document from a template"),                                                    "document-new",         G_CALLBACK (NULL),                                       },
 
     { THUNAR_LAUNCHER_ACTION_RESTORE,          "<Actions>/ThunarLauncher/restore",                 "",                  XFCE_GTK_MENU_ITEM,       N_ ("_Restore"),                        NULL,                                                                                            NULL,                   G_CALLBACK (thunar_launcher_action_restore),             },
-    { THUNAR_LAUNCHER_ACTION_MOVE_TO_TRASH,    "<Actions>/ThunarLauncher/move-to-trash",           "",                  XFCE_GTK_IMAGE_MENU_ITEM, N_ ("Mo_ve to Trash"),                  NULL,                                                                                            "user-trash",           G_CALLBACK (thunar_launcher_action_move_to_trash),       },
+    { THUNAR_LAUNCHER_ACTION_MOVE_TO_TRASH,    "<Actions>/ThunarLauncher/move-to-trash",           "",                  XFCE_GTK_IMAGE_MENU_ITEM, N_ ("Mo_ve to Trash"),                  NULL,                                                                                            "user-trash",           G_CALLBACK (thunar_launcher_action_trash_delete),       },
     { THUNAR_LAUNCHER_ACTION_DELETE,           "<Actions>/ThunarLauncher/delete",                  "",                  XFCE_GTK_IMAGE_MENU_ITEM, N_ ("_Delete"),                         NULL,                                                                                            "edit-delete",          G_CALLBACK (thunar_launcher_action_delete),              },
     { THUNAR_LAUNCHER_ACTION_DELETE,           "<Actions>/ThunarLauncher/delete-2",                "<Shift>Delete",     XFCE_GTK_IMAGE_MENU_ITEM, NULL,                                   NULL,                                                                                            NULL,                   G_CALLBACK (thunar_launcher_action_delete),              },
     { THUNAR_LAUNCHER_ACTION_DELETE,           "<Actions>/ThunarLauncher/delete-3",                "<Shift>KP_Delete",  XFCE_GTK_IMAGE_MENU_ITEM, NULL,                                   NULL,                                                                                            NULL,                   G_CALLBACK (thunar_launcher_action_delete),              },
@@ -301,6 +328,51 @@ thunar_launcher_class_init (ThunarLauncherClass *klass)
   gobject_class->set_property = thunar_launcher_set_property;
 
   /**
+   * ThunarLauncher::device-operation-started:
+   * @launcher : a #ThunarLauncher
+   * @device   : the #ThunarDevice on which the operation was finished
+   *
+   * This signal is emitted by the @launcher right after the device operation (mount/unmount/eject) is started
+   **/
+  launcher_signals[DEVICE_OPERATION_STARTED] =
+    g_signal_new (I_("device-operation-started"),
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_NO_HOOKS, 0,
+                  NULL, NULL,
+                  g_cclosure_marshal_generic,
+                  G_TYPE_NONE, 1, THUNAR_TYPE_DEVICE);
+
+  /**
+   * ThunarLauncher::device-operation-finished:
+   * @launcher : a #ThunarLauncher
+   * @device   : the #ThunarDevice on which the operation was finished
+   *
+   * This signal is emitted by the @launcher right after the device operation (mount/unmount/eject) is finished
+   **/
+  launcher_signals[DEVICE_OPERATION_FINISHED] =
+    g_signal_new (I_("device-operation-finished"),
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_NO_HOOKS, 0,
+                  NULL, NULL,
+                  g_cclosure_marshal_generic,
+                  G_TYPE_NONE, 1, THUNAR_TYPE_DEVICE);
+
+  /**
+   * ThunarLauncher::new-files-created:
+   * @launcher : a #ThunarLauncher
+   * @files   : a GList of #ThunarFiles which were created
+   *
+   * This signal is emitted by the @launcher whenever new files were created (e.g. via "rename", "create" or "paste")
+   **/
+  launcher_signals[NEW_FILES_CREATED] =
+    g_signal_new (I_("new-files-created"),
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_NO_HOOKS, 0,
+                  NULL, NULL,
+                  g_cclosure_marshal_generic,
+                  G_TYPE_NONE, 1, G_TYPE_POINTER);
+
+  /**
    * ThunarLauncher:widget:
    *
    * The #GtkWidget with which this launcher is associated.
@@ -313,18 +385,6 @@ thunar_launcher_class_init (ThunarLauncherClass *klass)
                            EXO_PARAM_WRITABLE);
 
   /**
-   * ThunarLauncher:select-files-closure:
-   *
-   * The #GClosure which will be called if the selected file should be updated after a launcher operation
-   **/
-  launcher_props[PROP_SELECT_FILES_CLOSURE] =
-     g_param_spec_pointer ("select-files-closure",
-                           "select-files-closure",
-                           "select-files-closure",
-                           G_PARAM_WRITABLE
-                           | G_PARAM_CONSTRUCT_ONLY);
-
-  /**
    * ThunarLauncher:select-device:
    *
    * The #ThunarDevice which currently is selected (or NULL if no #ThunarDevice is selected)
@@ -333,6 +393,17 @@ thunar_launcher_class_init (ThunarLauncherClass *klass)
      g_param_spec_pointer ("selected-device",
                            "selected-device",
                            "selected-device",
+                           G_PARAM_WRITABLE);
+
+  /**
+   * ThunarLauncher:select-device:
+   *
+   * The #GFile which currently is selected (or NULL if no #GFile is selected)
+   **/
+  launcher_props[PROP_SELECTED_LOCATION] =
+     g_param_spec_pointer ("selected-location",
+                           "selected-location",
+                           "selected-location",
                            G_PARAM_WRITABLE);
 
   /* Override ThunarNavigator's properties */
@@ -375,11 +446,16 @@ static void
 thunar_launcher_init (ThunarLauncher *launcher)
 {
   launcher->files_to_process = NULL;
-  launcher->select_files_closure = NULL;
   launcher->device_to_process = NULL;
+  launcher->location_to_process = NULL;
 
   /* grab a reference on the preferences */
   launcher->preferences = thunar_preferences_get ();
+
+  /* initialize the new_files_created_closure */
+  launcher->new_files_created_closure = g_cclosure_new_swap (G_CALLBACK (thunar_launcher_new_files_created), launcher, NULL);
+  g_closure_ref (launcher->new_files_created_closure);
+  g_closure_sink (launcher->new_files_created_closure);
 }
 
 
@@ -410,6 +486,9 @@ static void
 thunar_launcher_finalize (GObject *object)
 {
   ThunarLauncher *launcher = THUNAR_LAUNCHER (object);
+
+  g_closure_invalidate (launcher->new_files_created_closure);
+  g_closure_unref (launcher->new_files_created_closure);
 
   /* release the preferences reference */
   g_object_unref (launcher->preferences);
@@ -458,20 +537,20 @@ thunar_launcher_set_property (GObject      *object,
       break;
 
     case PROP_SELECTED_FILES:
-      thunar_component_set_selected_files (THUNAR_COMPONENT (object), g_value_get_boxed (value));
+      thunar_launcher_set_selection (launcher, g_value_get_boxed (value), NULL, NULL);
       break;
 
     case PROP_WIDGET:
       thunar_launcher_set_widget (launcher, g_value_get_object (value));
       break;
 
-    case PROP_SELECT_FILES_CLOSURE:
-      launcher->select_files_closure = g_value_get_pointer (value);
+    case PROP_SELECTED_DEVICE:
+      thunar_launcher_set_selection (launcher, NULL, g_value_get_pointer (value), NULL);
       break;
 
-    case PROP_SELECTED_DEVICE:
-      launcher->device_to_process = g_value_get_pointer (value);
-      break;
+    case PROP_SELECTED_LOCATION:
+      thunar_launcher_set_selection (launcher, NULL, NULL, g_value_get_pointer (value));
+     break;
 
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -747,6 +826,10 @@ thunar_launcher_open_files (ThunarLauncher *launcher,
       if (application_to_use)
         {
           app_info = g_app_info_dup (application_to_use);
+
+          /* Foreign data needs to be set explicitly to the new app_info */
+          if (g_object_get_data (G_OBJECT (application_to_use), "skip-app-info-update") != NULL)
+            g_object_set_data (G_OBJECT (app_info), "skip-app-info-update", GUINT_TO_POINTER (1));
         }
       else
         {
@@ -917,13 +1000,24 @@ thunar_launcher_poke (ThunarLauncher                 *launcher,
        return;
      }
 
-   poke_data = thunar_launcher_poke_data_new (launcher->files_to_process, application_to_use, folder_open_action);
+   poke_data = thunar_launcher_poke_data_new (launcher->files_to_process,
+                                              application_to_use,
+                                              folder_open_action,
+                                              launcher->location_to_process,
+                                              launcher->device_to_process);
 
    if (launcher->device_to_process != NULL)
      {
+       g_signal_emit (launcher, launcher_signals[DEVICE_OPERATION_STARTED], 0, launcher->device_to_process);
        thunar_browser_poke_device (THUNAR_BROWSER (launcher), launcher->device_to_process,
                                    launcher->widget, thunar_launcher_poke_device_finish,
                                   poke_data);
+     }
+   else if (launcher->location_to_process != NULL)
+     {
+       thunar_browser_poke_location (THUNAR_BROWSER (launcher), poke_data->location_to_poke,
+                                     launcher->widget, thunar_launcher_poke_location_finish,
+                                     poke_data);
      }
    else
      {
@@ -956,6 +1050,7 @@ static void thunar_launcher_poke_device_finish (ThunarBrowser *browser,
 
   if (cancelled == TRUE || error != NULL || mount_point == NULL)
     {
+      g_signal_emit (browser, launcher_signals[DEVICE_OPERATION_FINISHED], 0, volume);
       thunar_launcher_poke_data_free (poke_data);
       return;
     }
@@ -976,7 +1071,34 @@ static void thunar_launcher_poke_device_finish (ThunarBrowser *browser,
       thunar_navigator_change_directory (THUNAR_NAVIGATOR (browser), mount_point);
     }
 
+  g_signal_emit (browser, launcher_signals[DEVICE_OPERATION_FINISHED], 0, volume);
   thunar_launcher_poke_data_free (poke_data);
+}
+
+
+
+static void
+thunar_launcher_poke_location_finish (ThunarBrowser *browser,
+                                      GFile         *location,
+                                      ThunarFile    *file,
+                                      ThunarFile    *target_file,
+                                      GError        *error,
+                                      gpointer       user_data)
+{
+  ThunarLauncherPokeData *poke_data = user_data;
+  _thunar_return_if_fail (THUNAR_IS_BROWSER (browser));
+  _thunar_return_if_fail (THUNAR_IS_FILE (file));
+
+  if (error != NULL)
+    {
+      thunar_dialogs_show_error (GTK_WIDGET (THUNAR_LAUNCHER (browser)->widget), error,
+                                 _("Failed to open \"%s\""),
+                                 thunar_file_get_display_name (file));
+      thunar_launcher_poke_data_free (poke_data);
+      return;
+    }
+
+  thunar_launcher_poke_files_finish (browser, file, target_file, error, user_data);
 }
 
 
@@ -1112,7 +1234,9 @@ thunar_launcher_poke_files_finish (ThunarBrowser *browser,
 static ThunarLauncherPokeData *
 thunar_launcher_poke_data_new (GList                          *files_to_poke,
                                GAppInfo                       *application_to_use,
-                               ThunarLauncherFolderOpenAction  folder_open_action)
+                               ThunarLauncherFolderOpenAction  folder_open_action,
+                               GFile                          *location_to_poke,
+                               ThunarDevice                   *device_to_poke)
 {
   ThunarLauncherPokeData *data;
 
@@ -1120,6 +1244,12 @@ thunar_launcher_poke_data_new (GList                          *files_to_poke,
   data->files_to_poke = thunar_g_file_list_copy (files_to_poke);
   data->files_poked = NULL;
   data->application_to_use = application_to_use;
+
+  if (location_to_poke != NULL)
+    data->location_to_poke = g_object_ref (location_to_poke);
+
+  if (device_to_poke != NULL)
+    data->device_to_poke = g_object_ref (device_to_poke);
 
   /* keep a reference on the appdata */
   if (application_to_use != NULL)
@@ -1138,6 +1268,12 @@ thunar_launcher_poke_data_free (ThunarLauncherPokeData *data)
 
   thunar_g_file_list_free (data->files_to_poke);
   thunar_g_file_list_free (data->files_poked);
+
+  if (data->location_to_poke != NULL)
+    g_object_unref (data->location_to_poke);
+
+  if (data->device_to_poke != NULL)
+    g_object_unref (data->device_to_poke);
 
   if (data->application_to_use != NULL)
     g_object_unref (data->application_to_use);
@@ -1303,6 +1439,7 @@ thunar_launcher_append_menu_item (ThunarLauncher       *launcher,
   ThunarClipboardManager   *clipboard;
   ThunarFile               *parent;
   gint                      n;
+  const gchar              *eject_label;
 
   _thunar_return_val_if_fail (THUNAR_IS_LAUNCHER (launcher), NULL);
   _thunar_return_val_if_fail (action_entry != NULL, NULL);
@@ -1450,7 +1587,7 @@ thunar_launcher_append_menu_item (ThunarLauncher       *launcher,
         return NULL;
 
       case THUNAR_LAUNCHER_ACTION_CREATE_FOLDER:
-        if (launcher->files_are_selected && launcher->single_directory_to_process)
+        if (THUNAR_IS_TREE_VIEW (launcher->widget) && launcher->files_are_selected && launcher->single_directory_to_process)
           parent = launcher->single_folder;
         else
           parent = launcher->current_directory;
@@ -1461,7 +1598,7 @@ thunar_launcher_append_menu_item (ThunarLauncher       *launcher,
         return item;
 
       case THUNAR_LAUNCHER_ACTION_CREATE_DOCUMENT:
-        if (launcher->files_are_selected && launcher->single_directory_to_process)
+        if (THUNAR_IS_TREE_VIEW (launcher->widget) && launcher->files_are_selected && launcher->single_directory_to_process)
           parent = launcher->single_folder;
         else
           parent = launcher->current_directory;
@@ -1567,6 +1704,8 @@ thunar_launcher_append_menu_item (ThunarLauncher       *launcher,
           return NULL;
         item = xfce_gtk_menu_item_new_from_action_entry (action_entry, G_OBJECT (launcher), GTK_MENU_SHELL (menu));
         gtk_widget_set_sensitive (item, thunar_device_can_eject (launcher->device_to_process));
+        eject_label = thunar_device_get_eject_label (launcher->device_to_process);
+        gtk_menu_item_set_label (GTK_MENU_ITEM (item), eject_label);
         return item;
 
       default:
@@ -1856,6 +1995,7 @@ thunar_launcher_build_sendto_submenu (ThunarLauncher *launcher)
           item = xfce_gtk_image_menu_item_new (label_text, tooltip_text, NULL, G_CALLBACK (thunar_launcher_menu_item_activated),
                                                G_OBJECT (launcher), image, GTK_MENU_SHELL (submenu));
           g_object_set_qdata_full (G_OBJECT (item), thunar_launcher_appinfo_quark, g_object_ref (lp->data), g_object_unref);
+          g_object_set_data (G_OBJECT (lp->data), "skip-app-info-update", GUINT_TO_POINTER (1));
 
           /* cleanup */
           g_free (label_text);
@@ -1925,7 +2065,7 @@ thunar_launcher_action_make_link (ThunarLauncher *launcher)
    */
   application = thunar_application_get ();
   thunar_application_link_into (application, launcher->widget, g_files,
-                                thunar_file_get_file (launcher->current_directory), launcher->select_files_closure);
+                                thunar_file_get_file (launcher->current_directory), launcher->new_files_created_closure);
   g_object_unref (G_OBJECT (application));
   g_list_free (g_files);
 }
@@ -1954,7 +2094,7 @@ thunar_launcher_action_duplicate (ThunarLauncher *launcher)
        */
       application = thunar_application_get ();
       thunar_application_copy_into (application, launcher->widget, files_to_process,
-                                    thunar_file_get_file (launcher->current_directory), launcher->select_files_closure);
+                                    thunar_file_get_file (launcher->current_directory), launcher->new_files_created_closure);
       g_object_unref (G_OBJECT (application));
 
       /* clean up */
@@ -2212,9 +2352,14 @@ thunar_launcher_action_delete (ThunarLauncher *launcher)
 static void
 thunar_launcher_action_trash_delete (ThunarLauncher *launcher)
 {
+  GdkModifierType event_state;
+
   _thunar_return_if_fail (THUNAR_IS_LAUNCHER (launcher));
 
-  if (thunar_g_vfs_is_uri_scheme_supported ("trash"))
+  /* when shift modifier is pressed, we delete (as well via context menu) */
+  if (gtk_get_current_event_state (&event_state) && (event_state & GDK_SHIFT_MASK) != 0)
+    thunar_launcher_action_delete (launcher);
+  else if (thunar_g_vfs_is_uri_scheme_supported ("trash"))
     thunar_launcher_action_move_to_trash (launcher);
   else
     thunar_launcher_action_delete (launcher);
@@ -2261,7 +2406,7 @@ thunar_launcher_action_create_folder (ThunarLauncher *launcher)
   if (G_LIKELY (name != NULL))
     {
       /* fake the path list */
-      if (launcher->files_are_selected && launcher->single_directory_to_process)
+      if (THUNAR_IS_TREE_VIEW (launcher->widget) && launcher->files_are_selected && launcher->single_directory_to_process)
         path_list.data = g_file_resolve_relative_path (thunar_file_get_file (launcher->single_folder), name);
       else
         path_list.data = g_file_resolve_relative_path (thunar_file_get_file (launcher->current_directory), name);
@@ -2269,7 +2414,7 @@ thunar_launcher_action_create_folder (ThunarLauncher *launcher)
 
       /* launch the operation */
       application = thunar_application_get ();
-      thunar_application_mkdir (application, launcher->widget, &path_list, launcher->select_files_closure);
+      thunar_application_mkdir (application, launcher->widget, &path_list, launcher->new_files_created_closure);
       g_object_unref (G_OBJECT (application));
 
       /* release the path */
@@ -2327,7 +2472,7 @@ thunar_launcher_action_create_document (ThunarLauncher *launcher,
       if (G_LIKELY (launcher->parent_folder != NULL))
         {
           /* fake the target path list */
-          if (launcher->files_are_selected && launcher->single_directory_to_process)
+          if (THUNAR_IS_TREE_VIEW (launcher->widget) && launcher->files_are_selected && launcher->single_directory_to_process)
             target_path_list.data = g_file_get_child (thunar_file_get_file (launcher->single_folder), name);
           else
             target_path_list.data = g_file_get_child (thunar_file_get_file (launcher->current_directory), name);
@@ -2338,7 +2483,7 @@ thunar_launcher_action_create_document (ThunarLauncher *launcher,
           application = thunar_application_get ();
           thunar_application_creat (application, launcher->widget, &target_path_list,
                                     template_file != NULL ? thunar_file_get_file (template_file) : NULL,
-                                    launcher->select_files_closure);
+                                    launcher->new_files_created_closure);
           g_object_unref (G_OBJECT (application));
 
           /* release the target path */
@@ -2585,7 +2730,7 @@ thunar_launcher_action_paste (ThunarLauncher *launcher)
   _thunar_return_if_fail (THUNAR_IS_LAUNCHER (launcher));
 
   clipboard = thunar_clipboard_manager_get_for_display (gtk_widget_get_display (launcher->widget));
-  thunar_clipboard_manager_paste_files (clipboard, thunar_file_get_file (launcher->current_directory), launcher->widget, launcher->select_files_closure);
+  thunar_clipboard_manager_paste_files (clipboard, thunar_file_get_file (launcher->current_directory), launcher->widget, launcher->new_files_created_closure);
   g_object_unref (G_OBJECT (clipboard));
 }
 
@@ -2602,7 +2747,7 @@ thunar_launcher_action_paste_into_folder (ThunarLauncher *launcher)
     return;
 
   clipboard = thunar_clipboard_manager_get_for_display (gtk_widget_get_display (launcher->widget));
-  thunar_clipboard_manager_paste_files (clipboard, thunar_file_get_file (launcher->single_folder), launcher->widget, launcher->select_files_closure);
+  thunar_clipboard_manager_paste_files (clipboard, thunar_file_get_file (launcher->single_folder), launcher->widget, launcher->new_files_created_closure);
   g_object_unref (G_OBJECT (clipboard));
 }
 
@@ -2640,10 +2785,9 @@ thunar_launcher_action_eject_finish (ThunarDevice  *device,
       thunar_dialogs_show_error (GTK_WIDGET (launcher->widget), error, _("Failed to eject \"%s\""), device_name);
       g_free (device_name);
     }
-  else
-    launcher->device_to_process = NULL;
 
   g_object_unref (launcher);
+  g_signal_emit (launcher, launcher_signals[DEVICE_OPERATION_FINISHED], 0, device);
 }
 
 
@@ -2665,6 +2809,8 @@ thunar_launcher_action_eject (ThunarLauncher *launcher)
     {
       /* prepare a mount operation */
       mount_operation = thunar_gtk_mount_operation_new (GTK_WIDGET (launcher->widget));
+
+      g_signal_emit (launcher, launcher_signals[DEVICE_OPERATION_STARTED], 0, launcher->device_to_process);
 
       /* eject */
       thunar_device_eject (launcher->device_to_process,
@@ -2698,10 +2844,9 @@ thunar_launcher_action_unmount_finish (ThunarDevice *device,
       thunar_dialogs_show_error (GTK_WIDGET (launcher->widget), error, _("Failed to unmount \"%s\""), device_name);
       g_free (device_name);
     }
-  else
-    launcher->device_to_process = NULL;
 
   g_object_unref (launcher);
+  g_signal_emit (launcher, launcher_signals[DEVICE_OPERATION_FINISHED], 0, device);
 }
 
 
@@ -2723,6 +2868,8 @@ thunar_launcher_action_unmount (ThunarLauncher *launcher)
     {
       /* prepare a mount operation */
       mount_operation = thunar_gtk_mount_operation_new (GTK_WIDGET (launcher->widget));
+
+      g_signal_emit (launcher, launcher_signals[DEVICE_OPERATION_STARTED], 0, launcher->device_to_process);
 
       /* eject */
       thunar_device_unmount (launcher->device_to_process,
@@ -2865,6 +3012,11 @@ thunar_launcher_append_open_section (ThunarLauncher *launcher,
       submenu = thunar_launcher_build_application_submenu (launcher, applications);
       gtk_menu_item_set_submenu (GTK_MENU_ITEM (menu_item), submenu);
     }
+  else
+    {
+      if (launcher->n_files_to_process == 1)
+        thunar_launcher_append_menu_item (launcher, GTK_MENU_SHELL (menu), THUNAR_LAUNCHER_ACTION_OPEN_WITH_OTHER, FALSE);
+    }
 
   g_list_free_full (applications, g_object_unref);
   return TRUE;
@@ -2885,4 +3037,57 @@ thunar_launcher_get_widget (ThunarLauncher *launcher)
 {
   _thunar_return_val_if_fail (THUNAR_IS_LAUNCHER (launcher), NULL);
   return launcher->widget;
+}
+
+
+
+/**
+ * thunar_launcher_set_selection:
+ * @launcher : a #ThunarLauncher instance
+ * @selected_thunar_files: #GList of selected #ThunarFile instances, or NULL
+ * @selected_device: selected #ThunarDevice or NULL
+ * @selected_location: selected #GFile (possibly only holds an URI), or NULL
+ *
+ * Will set the related items as "selection" and clear any previous selection.
+ * Note that always only one of the 3 "selected" arguments should be set.
+ **/
+void
+thunar_launcher_set_selection (ThunarLauncher *launcher,
+                               GList          *selected_thunar_files,
+                               ThunarDevice   *selected_device,
+                               GFile          *selected_location)
+{
+  _thunar_return_if_fail (THUNAR_IS_LAUNCHER (launcher));
+
+  /* unref the current device/location */
+  if (launcher->device_to_process != NULL)
+    {
+      g_object_unref (launcher->device_to_process);
+      launcher->device_to_process = NULL;
+    }
+  if (launcher->location_to_process != NULL)
+    {
+      g_object_unref (launcher->location_to_process);
+      launcher->location_to_process = NULL;
+    }
+
+  /* ref the new device/location */
+  if (selected_device != NULL)
+    launcher->device_to_process = g_object_ref (selected_device);
+  if (selected_location != NULL)
+    launcher->location_to_process = g_object_ref (selected_location);
+
+  /* for selected files things are a bit more conmplicated */
+  thunar_launcher_set_selected_files (THUNAR_COMPONENT (launcher), selected_thunar_files);
+}
+
+
+
+static void
+thunar_launcher_new_files_created (ThunarLauncher *launcher,
+                                   GList          *new_thunar_files)
+{
+  _thunar_return_if_fail (THUNAR_IS_LAUNCHER (launcher));
+
+  g_signal_emit (launcher, launcher_signals[NEW_FILES_CREATED], 0, new_thunar_files);
 }
